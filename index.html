@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bell Controller</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #f2f3f5;
+    color: #1d1f23;
+    margin: 0;
+    padding: 16px;
+    display: flex;
+    justify-content: center;
+  }
+  .card {
+    background: #fff;
+    width: 100%;
+    max-width: 420px;
+    border-radius: 14px;
+    padding: 20px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.08);
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 16px; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: #666; margin: 22px 0 8px; }
+  button {
+    font: inherit;
+    padding: 12px 16px;
+    border: none;
+    border-radius: 10px;
+    background: #2457d6;
+    color: #fff;
+    cursor: pointer;
+    width: 100%;
+  }
+  button.secondary { background: #e4e6ea; color: #1d1f23; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  input, select {
+    font: inherit;
+    padding: 11px;
+    border: 1px solid #c9ccd2;
+    border-radius: 10px;
+    width: 100%;
+    background: #fff;
+  }
+  .status { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tile { background: #f2f3f5; border-radius: 10px; padding: 12px; }
+  .tile small { display: block; color: #666; margin-bottom: 4px; }
+  .tile strong { font-size: 1.25rem; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 99px; font-size: .8rem; background: #e4e6ea; }
+  .pill.on { background: #d3f2dc; color: #0f6a2a; }
+  #log { font-size: .85rem; color: #555; min-height: 1.2em; margin-top: 14px; }
+  #warn { background: #fff3cd; border-radius: 10px; padding: 10px; font-size: .9rem; display: none; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Bell Controller <span id="conn" class="pill">Disconnected</span></h1>
+
+  <div id="warn"></div>
+
+  <button id="connectBtn">Connect to ESP32</button>
+
+  <h2>Status</h2>
+  <div class="status">
+    <div class="tile"><small>State</small><strong id="state">-</strong></div>
+    <div class="tile"><small>Next ring in</small><strong id="next">-</strong></div>
+    <div class="tile" style="grid-column: span 2"><small>Current offset</small><strong id="curOffset">-</strong></div>
+  </div>
+
+  <h2>Set offset</h2>
+  <div class="row">
+    <input id="minutes" type="number" min="0" max="10" step="0.5" value="5" inputmode="decimal">
+    <select id="direction">
+      <option value="early">minutes early</option>
+      <option value="late">minutes late</option>
+    </select>
+  </div>
+  <p style="font-size:.85rem;color:#666;margin:8px 0 12px">
+    How far off the schedule was the button press? Pressed early &rarr; rings are pushed later to match the real schedule; pressed late &rarr; pulled earlier.
+  </p>
+  <button id="sendBtn" disabled>Send offset</button>
+
+  <h2>Other</h2>
+  <div class="row">
+    <button id="testBtn" class="secondary" disabled>Test ring</button>
+    <button id="stopBtn" class="secondary" disabled>Stop schedule</button>
+  </div>
+
+  <div id="log"></div>
+</div>
+
+<script>
+const SERVICE_UUID = "7a1c0001-5b3e-4f6a-9c1d-2e8b0a4d6f10";
+const CMD_UUID     = "7a1c0002-5b3e-4f6a-9c1d-2e8b0a4d6f10";
+const STATUS_UUID  = "7a1c0003-5b3e-4f6a-9c1d-2e8b0a4d6f10";
+
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+let device = null;
+let cmdChar = null;
+let statusChar = null;
+
+function log(msg) { $("log").textContent = msg; }
+
+function setConnected(on) {
+  $("conn").textContent = on ? "Connected" : "Disconnected";
+  $("conn").classList.toggle("on", on);
+  $("connectBtn").textContent = on ? "Disconnect" : "Connect to ESP32";
+  ["sendBtn", "testBtn", "stopBtn"].forEach(id => $(id).disabled = !on);
+  if (!on) {
+    $("state").textContent = "-";
+    $("next").textContent = "-";
+    $("curOffset").textContent = "-";
+  }
+}
+
+function fmtTime(totalSec) {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function fmtOffset(sec) {
+  if (sec === 0) return "None";
+  const abs = Math.abs(sec);
+  return `${fmtTime(abs)} ${sec > 0 ? "early" : "late"}`;
+}
+
+function onStatus(event) {
+  const text = dec.decode(event.target.value);
+  const [state, secs, off] = text.split(",");
+  const labels = { IDLE: "Waiting for button", RUN: "Running", RING: "Ringing" };
+  $("state").textContent = labels[state] || state;
+  $("next").textContent = state === "IDLE" ? "-" : fmtTime(parseInt(secs, 10) || 0);
+  $("curOffset").textContent = fmtOffset(parseInt(off, 10) || 0);
+}
+
+async function connect() {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+      optionalServices: [SERVICE_UUID]
+    });
+    device.addEventListener("gattserverdisconnected", () => {
+      setConnected(false);
+      log("Disconnected.");
+    });
+    log("Connecting...");
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    cmdChar = await service.getCharacteristic(CMD_UUID);
+    statusChar = await service.getCharacteristic(STATUS_UUID);
+    statusChar.addEventListener("characteristicvaluechanged", onStatus);
+    await statusChar.startNotifications();
+    onStatus({ target: await statusChar.readValue().then(v => ({ value: v })) });
+    setConnected(true);
+    log("Connected.");
+  } catch (err) {
+    log("Connection failed: " + err.message);
+    setConnected(false);
+  }
+}
+
+function disconnect() {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+
+async function sendCommand(text) {
+  if (!cmdChar) return;
+  try {
+    await cmdChar.writeValue(enc.encode(text));
+    return true;
+  } catch (err) {
+    log("Send failed: " + err.message);
+    return false;
+  }
+}
+
+$("connectBtn").addEventListener("click", () => {
+  if (device && device.gatt.connected) disconnect();
+  else connect();
+});
+
+$("sendBtn").addEventListener("click", async () => {
+  const minutes = parseFloat($("minutes").value);
+  if (isNaN(minutes) || minutes < 0 || minutes > 10) {
+    log("Enter a value between 0 and 10 minutes.");
+    return;
+  }
+  const sign = $("direction").value === "early" ? 1 : -1;
+  const seconds = Math.round(minutes * 60) * sign;
+  if (await sendCommand("SET:" + seconds)) log(`Offset sent: ${fmtOffset(seconds)}.`);
+});
+
+$("testBtn").addEventListener("click", async () => {
+  if (await sendCommand("TEST")) log("Test ring sent.");
+});
+
+$("stopBtn").addEventListener("click", async () => {
+  if (await sendCommand("STOP")) log("Schedule stopped. Press the button to start again.");
+});
+
+// Feature check
+if (!navigator.bluetooth) {
+  const warn = $("warn");
+  warn.style.display = "block";
+  warn.textContent = /iPhone|iPad|iPod/.test(navigator.userAgent)
+    ? "iOS browsers don't support Web Bluetooth. Use Chrome on Android or desktop, or the Bluefy browser on iOS."
+    : "Web Bluetooth isn't available here. Use Chrome or Edge, and open this page over HTTPS or localhost.";
+  $("connectBtn").disabled = true;
+}
+setConnected(false);
+</script>
+</body>
+</html>
