@@ -175,7 +175,7 @@
         $("conn").textContent = on ? "Connected" : "Disconnected";
         $("conn").classList.toggle("on", on);
         $("connectBtn").textContent = on ? "Disconnect" : "Connect";
-        ["sendBtn", "testBtn", "stopBtn"].forEach(
+        ["sendBtn", "testBtn", "pauseBtn", "stopBtn"].forEach(
           (id) => ($(id).disabled = !on),
         );
         if (!on) {
@@ -205,10 +205,12 @@
           RUN: "Running",
           RING: "Ringing",
         };
-        if (state === labels.RING) {
+        if (state === "RING") {
           $("pauseBtn").classList.remove("hidden");
         } else {
           $("pauseBtn").classList.add("hidden");
+          paused = false;
+          $("pauseBtn").innerText = "Pause";
         }
         $("state").textContent = labels[state] || state;
         $("next").textContent =
